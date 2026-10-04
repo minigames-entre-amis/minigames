@@ -99,6 +99,9 @@ input[type="text"] { font: inherit; padding: 11px 12px; border-radius: 10px; bor
 .backlink { align-self: flex-start; color: var(--muted); text-decoration: none; font-weight: 700; font-size: 13px; padding: 6px 0; }
 .backlink:hover, .backlink:focus-visible { color: var(--accent); }
 button, a, label, input { touch-action: manipulation; }
+.clues { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-radius: 12px; background: var(--soft); border: 1px solid var(--line); }
+.clueturn ul { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.clueturn li { overflow-wrap: anywhere; }
 .err { color: var(--under); font-weight: 700; }
 .sep { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .12em; }
 .sep::before, .sep::after { content: ""; flex: 1; height: 1px; background: var(--line); }
@@ -155,6 +158,7 @@ button, a, label, input { touch-action: manipulation; }
       <li>Avant la partie, on choisit le nombre d'Undercover. Il faut toujours au moins 2 Civils, et au moins autant de Civils que d'intrus (Undercover + Mr. White).</li>
       <li>Chacun décrit son mot en un mot ou une courte phrase. L'ordre de parole est tiré au hasard à chaque tour. Mr. White ne commence jamais.</li>
       <li>Un joueur qui a oublié son mot peut le revoir pendant la partie.</li>
+      <li>En ligne, l'option <b>Jouer à distance</b> (à cocher en créant la partie) remplace l'indice dit à voix haute par un indice écrit, visible par tous jusqu'au vote. On ne peut pas écrire son propre mot.</li>
       <li>Après chaque tour de parole, on choisit le joueur à éliminer. Son rôle est révélé.</li>
       <li>En cas d'égalité, personne n'est éliminé : on relance un tour de parole, puis on revote. En ligne, l'égalité est détectée automatiquement.</li>
       <li>Mr. White éliminé peut deviner le mot des Civils : s'il trouve, il gagne seul. Les accents, les majuscules, le pluriel, le féminin et les petites fautes de frappe sont acceptés.</li>
@@ -226,7 +230,7 @@ function startRound(G) {
   G.roundNo += 1;
   G.lastGains = {};
   G.R = { civilWord: pair[0], underWord: pair[1], roles, alive: ids.slice(), seat: shuffle(ids),
-          revealIdx: 0, shown: false, order: [], speakIdx: 0, turnNo: 0, pick: null, elim: null, guess: null, winner: null, champions: [], notice: "" };
+          revealIdx: 0, shown: false, order: [], speakIdx: 0, turnNo: 0, pick: null, elim: null, guess: null, winner: null, champions: [], notice: "", clues: [] };
   G.screen = "reveal";
 }
 
@@ -381,13 +385,19 @@ function resetHTML(confirming, canReset, extra) {
 
 /* ---------- rendu ---------- */
 const $ = id => document.getElementById(id);
+const screenSig = () => JSON.stringify([S.mode, N.code, N.game?.screen, N.game?.roundNo, N.game?.R?.turnNo, N.game?.R?.speakIdx, N.game?.R?.clues?.length, N.err, N.busy, N.confirmLeave, N.confirmReset, N.showWord]);
 function render() {
+  // En ligne, pendant qu'on écrit : si rien d'important n'a changé, on ne reconstruit pas l'écran
+  // (sur Android, remplacer le champ refermerait le clavier).
+  const ae = document.activeElement;
+  if (S.mode === "online" && ae && ae.tagName === "INPUT" && ae.type === "text" && $("screen").contains(ae) && screenSig() === N.lastSig) return;
   // garde ce qui est en cours de saisie quand l'écran se redessine (mises à jour en ligne)
   const kept = {}; document.querySelectorAll("#screen input[type=text]").forEach(i => kept[i.id] = i.value);
   const active = document.activeElement?.id;
   $("modeLocal").setAttribute("aria-pressed", S.mode === "local");
   $("modeOnline").setAttribute("aria-pressed", S.mode === "online");
   if (S.mode === "online") renderNet(); else renderLocal();
+  N.lastSig = screenSig();
   Object.entries(kept).forEach(([id, v]) => { const i = $(id); if (i && !i.value) i.value = v; });
   save();
   if (active && $(active) && $(active).tagName === "INPUT") { $(active).focus(); return; }
@@ -574,7 +584,7 @@ function normGame(g) {
   G.players = arr(G.players); G.useWhite = !!G.useWhite; G.roundNo = G.roundNo || 0;
   if (G.R) {
     const R = G.R;
-    R.order = arr(R.order); R.alive = arr(R.alive); R.seat = arr(R.seat); R.champions = arr(R.champions);
+    R.order = arr(R.order); R.alive = arr(R.alive); R.seat = arr(R.seat); R.champions = arr(R.champions); R.clues = arr(R.clues);
     R.roles = R.roles || {}; R.speakIdx = R.speakIdx || 0; R.turnNo = R.turnNo || 0;
     R.notice = R.notice || ""; R.elim = R.elim ?? null; R.guess = R.guess ?? null; R.winner = R.winner ?? null; R.pick = R.pick ?? null;
   } else G.R = null;
@@ -640,7 +650,7 @@ function watch(code) {
 }
 function stopWatching() { clearTimeout(N.loadTimer); N.unsub?.(); N.unsub = null; N.code = null; N.game = null; S.net = null; save(); }
 
-async function createGame(name) {
+async function createGame(name, remote) {
   if (!initFirebase()) return render();
   N.me = myPid(); N.busy = true; N.err = ""; render();
   try {
@@ -648,7 +658,7 @@ async function createGame(name) {
       const code = newCode();
       const res = await DB.runTransaction(gameRef(code), cur => {
         if (cur !== null) return undefined; // code déjà pris
-        return { code, createdAt: Date.now(), host: N.me, screen: "lobby", lobby: { [N.me]: { name, joinedAt: Date.now() } }, useWhite: false, roundNo: 0 };
+        return { code, createdAt: Date.now(), host: N.me, screen: "lobby", lobby: { [N.me]: { name, joinedAt: Date.now() } }, useWhite: false, roundNo: 0, remote: !!remote };
       });
       if (res.committed) { N.busy = false; watch(code); return; }
     }
@@ -716,6 +726,13 @@ function renderNet() {
   $("screen").innerHTML = `<section class="card">${offline}${netView(G)}${N.err ? `<p class="err" role="alert">${esc(N.err)}</p>` : ""}${N.err === OFFLINE_MSG ? `<button data-act="mode" data-mode="local">Jouer sur un seul téléphone en attendant</button>` : ""}</section>${leave}`;
 }
 
+// Indices écrits (partie à distance), regroupés par tour de parole, les plus récents en haut.
+function cluesHTML(G) {
+  const clues = G.R?.clues || [];
+  if (!clues.length) return `<div class="clues"><span class="tag">Indices</span><p class="muted">Aucun indice pour l'instant.</p></div>`;
+  const turns = [...new Set(clues.map(c => c.turn))].sort((a, b) => b - a);
+  return `<div class="clues"><span class="tag">Indices</span>${turns.map(t => `<div class="clueturn"><span class="muted">Tour ${t}</span><ul>${clues.filter(c => c.turn === t).map(c => `<li><b>${esc(pName(c.p))}</b> · ${esc(c.t)}</li>`).join("")}</ul></div>`).join("")}</div>`;
+}
 function netWordBox(G) {
   const R = G.R;
   if (!R || !R.roles[N.me]) return `<div class="mine"><span class="muted">Tu regardes cette manche. Tu joueras à la suivante.</span></div>`;
@@ -734,7 +751,9 @@ function netView(G) {
       <p class="muted">Pas besoin de compte. Tes amis peuvent rejoindre même si ton téléphone est en veille.</p>
       <label class="tag" for="nName">Ton pseudo</label>
       <input type="text" id="nName" maxlength="20" placeholder="Ex. Léa" autocomplete="off" value="${esc(S.myName || "")}">
-      ${hashCode ? "" : `<button class="primary" data-act="n-create" ${dis}>Créer une partie</button><div class="sep">ou</div>`}
+      ${hashCode ? "" : `<label class="toggle"><input type="checkbox" id="nRemote" ${S.remotePref ? "checked" : ""}>
+        <span><b>Jouer à distance</b><br><span class="muted">Pour jouer sans être dans la même pièce : chacun écrit son indice au lieu de le dire à voix haute.</span></span></label>
+      <button class="primary" data-act="n-create" ${dis}>Créer une partie</button><div class="sep">ou</div>`}
       <form class="row" id="joinForm"><input type="text" id="nCode" maxlength="4" placeholder="Code (ex. KTRW)" aria-label="Code de la partie" autocomplete="off" style="text-transform:uppercase" value="${esc(hashCode)}"><button type="submit" class="${hashCode ? "primary" : ""}" ${dis}>Rejoindre</button></form>`;
   }
   const head = `<div class="codebox"><div><span class="tag">Code de la partie</span><div class="code">${esc(N.code)}</div></div></div>`;
@@ -752,6 +771,7 @@ function netView(G) {
         <button class="primary" data-act="n-invite">${N.copied ? "Invitation copiée ✓" : "Inviter"}</button>
         ${N.showInviteText ? `<textarea id="inviteText" readonly rows="3" aria-label="Texte de l'invitation">${esc(inviteText())}</textarea><span class="muted">Copie ce texte à la main.</span>` : ""}
       </div>
+      <p class="notice">${G.remote ? "Partie à distance : chacun écrit son indice à son tour." : "Partie dans la même pièce : chacun dit son indice à voix haute."}</p>
       <div><span class="tag">Joueurs ${n}/${MAX_PLAYERS}</span></div>
       <ul class="players">${rows}</ul>
       ${G.host === N.me ? `
@@ -767,12 +787,15 @@ function netView(G) {
       ${R.notice ? `<p class="notice">${esc(R.notice)}</p>` : ""}
       <div class="speaker" aria-live="polite">
         <span class="muted">Tour de parole ${R.turnNo} · ${R.speakIdx + 1}/${R.order.length}</span>
-        <span class="big">${me ? "C'est à toi de parler !" : `C'est au tour de ${esc(pName(cur))}`}</span>
-        <span class="muted">${me ? "Décris ton mot à voix haute, puis appuie sur le bouton." : "Écoute sa description."}</span>
+        <span class="big">${me ? (G.remote ? "C'est à toi d'écrire !" : "C'est à toi de parler !") : `C'est au tour de ${esc(pName(cur))}`}</span>
+        <span class="muted">${me ? (G.remote ? "Écris un indice sur ton mot, sans le donner." : "Décris ton mot à voix haute, puis appuie sur le bouton.") : (G.remote ? "Son indice va apparaître ci-dessous." : "Écoute sa description.")}</span>
       </div>
       ${orderChips(R)}
-      ${me ? `<button class="primary" data-act="n-spoke" data-autofocus ${dis}>${last ? "J'ai parlé, passer au vote" : "J'ai parlé"}</button>`
-           : G.host === N.me ? `<button class="ghost" data-act="n-spoke" ${dis}>Passer : ${esc(pName(cur))} a parlé</button>` : ""}`;
+      ${G.remote ? cluesHTML(G) : ""}
+      ${me ? (G.remote
+          ? `<form class="row" id="clueForm"><input type="text" id="clueIn" maxlength="60" placeholder="Ton indice (un mot ou une courte phrase)" aria-label="Ton indice" autocomplete="off"><button type="submit" class="primary" ${dis}>Envoyer</button></form>`
+          : `<button class="primary" data-act="n-spoke" data-autofocus ${dis}>${last ? "J'ai parlé, passer au vote" : "J'ai parlé"}</button>`)
+           : G.host === N.me ? `<button class="ghost" data-act="n-spoke" ${dis}>Passer : ${esc(pName(cur))} ${G.remote ? "n'écrit pas" : "a parlé"}</button>` : ""}`;
   }
 
   if (G.screen === "vote") {
@@ -783,6 +806,7 @@ function netView(G) {
     return `${head}${netWordBox(G)}
       <span class="tag">Vote · tour ${R.turnNo}</span>
       <h2>${canVote ? "Qui veux-tu éliminer ?" : "Les joueurs votent"}</h2>
+      ${G.remote ? cluesHTML(G) : ""}
       ${canVote ? `<p class="muted">Appuie sur « Choisir ». Tu peux changer d'avis tant que tout le monde n'a pas voté. En cas d'égalité, un nouveau tour est lancé automatiquement.</p>` : ""}
       <ul class="players">${rows}</ul>
       <div><span class="tag">Ont voté : ${voters}/${R.alive.length}</span></div>
@@ -827,7 +851,8 @@ function netAction(act_, rawId) {
     case "n-create": {
       const name = $("nName").value.trim();
       if (!name) { N.err = "Choisis un pseudo d'abord."; break; }
-      S.myName = name; N.showWord = false; createGame(name); return;
+      S.remotePref = !!$("nRemote")?.checked;
+      S.myName = name; N.showWord = false; createGame(name, S.remotePref); return;
     }
     case "n-leave": N.confirmLeave = true; break;
     case "n-leave-no": N.confirmLeave = false; break;
@@ -894,6 +919,13 @@ document.addEventListener("submit", e => {
     else if (!/^[A-Z]{4}$/.test(code)) N.err = "Le code fait 4 lettres.";
     else { S.myName = name; N.showWord = false; joinGame(code, name); return; }
     render();
+  }
+  if (id === "clueForm") {
+    const t = $("clueIn").value.trim().slice(0, 60), me = N.me, G = N.game, word = G?.R ? wordOf(G.R, me) : null;
+    if (!t) { N.err = "Écris un indice avant d'envoyer."; render(); return; }
+    // on n'envoie pas son propre mot (même au pluriel, au féminin ou avec une faute)
+    if (word && t.split(/[\s'’,.;:!?-]+/).some(w => w && guessMatches(w, word, null))) { N.err = "Ton indice contient ton mot : trouve une autre façon de le décrire."; render(); return; }
+    act(G => { const R = G.R; if (G.screen !== "speak" || R.order[R.speakIdx] !== me) return false; R.clues.push({ p: me, t, turn: R.turnNo }); advanceSpeaker(G); });
   }
   if (id === "nGuessForm") {
     const g = $("nGuess").value.trim(), me = N.me;

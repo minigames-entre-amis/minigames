@@ -331,7 +331,7 @@ function render() {
   if (PAD.cur) { clearTimeout(renderTimer); renderTimer = setTimeout(render, 150); return; } // ne pas casser un trait en cours
   // Quelqu'un est en train d'écrire : si l'écran n'a pas changé de fond, on garde le champ (et le clavier) en place.
   const ae = document.activeElement;
-  if (ae && ae.tagName === "INPUT" && $("screen").contains(ae) && screenSig() === N.lastSig) {
+  if (ae && ae.tagName === "INPUT" && ae.type === "text" && $("screen").contains(ae) && screenSig() === N.lastSig) {
     const prog = document.querySelector("#screen .progress"), s = N.s;
     if (prog && s?.order) prog.innerHTML = s.order.map(id => `<span class="${s.done[id] ? "ok" : ""}">${esc(nameOf(id))}</span>`).join("");
     tick(); return;
